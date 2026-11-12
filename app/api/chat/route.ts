@@ -3,25 +3,39 @@
 // API anahtarı sadece burada, sunucuda kullanılır; tarayıcıya asla gönderilmez.
 
 import { GoogleGenAI } from "@google/genai";
+import { dinlendir, musaitOlana, yerAyir } from "@/lib/modelKotasi";
+import { hizKontrol } from "@/lib/hizSiniri";
 
 // Vercel'de bu fonksiyonun en fazla kaç saniye çalışabileceği.
 export const maxDuration = 60;
 
-// Sırayla denenecek modeller. Biri yoğunsa / kotası dolduysa / geç kalırsa sıradakine geçilir.
-// Ücretsiz katmanda Flash modelleri sık sık "yoğun" hatası veriyor; Flash-Lite daha güvenilir.
-// İstenirse .env.local içinde GEMINI_MODELS=model1,model2 ile değiştirilebilir.
-const MODELLER = (process.env.GEMINI_MODELS || "gemini-3.5-flash-lite,gemini-3.8-flash,gemini-3.1-flash-lite")
-  .split(",")
-  .map((m) => m.trim())
-  .filter(Boolean);
+// Sırayla denenecek modeller.
+// - dakikalikLimit: Google'ın ücretsiz katmandaki dakikalık istek sınırı.
+//   3.5-flash-lite: 15/dk (Google'ın 429 hata mesajından). 3.1-flash-lite: bilinmiyor, 15 varsayıldı.
+// - sureMs: ilk kelime bu süre içinde gelmezse model "yoğun" sayılır, sıradakine geçilir.
+// Ölçümler (12.11.2026): 3.5-flash-lite güvenilir; 3.1-flash-lite sık sık cevap vermiyor (yedek).
+// gemini-3.8-flash çıkarıldı: ücretsiz katmanda sadece 5/dk ve 20/gün.
+// Kapasite ≈ dakikada 15 soru (+ yedek müsaitse biraz fazlası).
+const MODELLER = [
+  { ad: "gemini-3.5-flash-lite", dakikalikLimit: 15, sureMs: 15_000 },
+  { ad: "gemini-3.1-flash-lite", dakikalikLimit: 15, sureMs: 8_000 },
+];
 
-// Bir modelden ilk kelime bu süre içinde gelmezse sıradaki modele geçilir.
-// İlk modele biraz daha fazla süre tanınır.
-const ILK_MODEL_SURESI_MS = 15_000;
-const YEDEK_MODEL_SURESI_MS = 10_000;
+// Bütün modellerin kotası doluysa en fazla bu kadar sırada bekletilir (maxDuration'ın altında kalmalı).
+const MAKS_BEKLEME_MS = 45_000;
 
-// Kötüye kullanımı ve ücretsiz kotanın hızla bitmesini önleyen sınırlar.
-const MAKS_MESAJ_SAYISI = 20; // geçmişten en fazla bu kadar mesaj gönderilir
+// Hata türüne göre modelin dinlendirileceği süre.
+const DINLENME_MS = { yogun: 10_000, zamanAsimi: 60_000, kota: 30_000, diger: 30_000 };
+
+// Kişi başı sınırlar (dakikada). Ortak kota dakikada ~15 soru olduğu için bir kişi en fazla 3 soru
+// sorabilir; böylece 10 kişi aynı anda adil şekilde kullanabilir.
+// Aynı Wi-Fi'deki (ör. kampüs) öğrenciler aynı IP'yi paylaşabildiği için asıl sınır tarayıcı kimliğine
+// göre; IP sınırı sadece kötüye kullanıma karşı geniş bir emniyet.
+const KISI_DAKIKALIK_LIMIT = 3;
+const IP_DAKIKALIK_LIMIT = 60;
+
+// Kötüye kullanımı ve kotanın hızla bitmesini önleyen sınırlar.
+const MAKS_MESAJ_SAYISI = 8; // Gemini'ye geçmişten en fazla bu kadar mesaj gönderilir
 const MAKS_MESAJ_UZUNLUGU = 4_000; // karakter
 
 // 1. Aşama: henüz belge veritabanı (RAG) yok. Asistan uydurmasın diye bunu açıkça söylüyoruz.
@@ -47,8 +61,8 @@ function girdiOlustur(mesajlar: Mesaj[]) {
 type Girdi = ReturnType<typeof girdiOlustur>;
 
 // Hata durumunda tarayıcıya Türkçe mesajlı bir JSON cevabı döndürür.
-function hata(mesaj: string, durum: number) {
-  return Response.json({ error: mesaj }, { status: durum });
+function hata(mesaj: string, durum: number, ekBasliklar?: Record<string, string>) {
+  return Response.json({ error: mesaj }, { status: durum, headers: ekBasliklar });
 }
 
 // Gelen isteğin gövdesinin beklediğimiz biçimde olduğunu kontrol eder.
@@ -71,7 +85,18 @@ function mesajlariDogrula(govde: unknown): Mesaj[] | null {
   // Son mesaj kullanıcıdan gelmeli (soruyu o soruyor).
   if (mesajlar[mesajlar.length - 1].role !== "user") return null;
 
-  return (mesajlar as Mesaj[]).slice(-MAKS_MESAJ_SAYISI);
+  // Son birkaç mesajı al; geçmiş asistan mesajıyla başlamasın.
+  const son = (mesajlar as Mesaj[]).slice(-MAKS_MESAJ_SAYISI);
+  while (son.length > 1 && son[0].role === "assistant") son.shift();
+  return son;
+}
+
+// İsteği gönderen kişiyi tanımak için: tarayıcının ürettiği rastgele kimlik + IP adresi.
+function kimlikleriAl(istek: Request) {
+  const ip = istek.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "yerel";
+  const tarayici = istek.headers.get("x-istemci-kimlik") ?? "";
+  const gecerli = /^[a-zA-Z0-9-]{8,64}$/.test(tarayici);
+  return { ip, kisi: gecerli ? `t:${tarayici}` : `ip:${ip}` };
 }
 
 export async function POST(istek: Request) {
@@ -94,27 +119,52 @@ export async function POST(istek: Request) {
     );
   }
 
+  // Kişi başı hız sınırı (geçersiz istekler sayılmaz, o yüzden doğrulamadan sonra).
+  const { ip, kisi } = kimlikleriAl(istek);
+  const bekle = Math.max(hizKontrol(kisi, KISI_DAKIKALIK_LIMIT), hizKontrol(`ip:${ip}`, IP_DAKIKALIK_LIMIT));
+  if (bekle > 0) {
+    const saniye = Math.ceil(bekle / 1000);
+    return hata(`Çok hızlı soru soruyorsun. Lütfen ${saniye} saniye sonra tekrar dene.`, 429, {
+      "Retry-After": String(saniye),
+    });
+  }
+
   const ai = new GoogleGenAI({ apiKey });
   const girdi = girdiOlustur(mesajlar);
 
-  // Modelleri sırayla dene; ilk kelimeyi gönderen ilk model kazanır.
+  // Müsait modelleri sırayla dene. Hepsinin kotası doluysa, biri müsait olana kadar
+  // (en fazla MAKS_BEKLEME_MS) bekle ve tekrar dene. Böylece yoğun anda hata yerine kısa bir gecikme olur.
+  const sonTarih = Date.now() + MAKS_BEKLEME_MS;
   const hatalar: SebepliHata[] = [];
-  let basari: { olaylar: AsyncIterator<unknown>; ilkParca: string; iptal: AbortController } | null = null;
+  let basari: Basari | null = null;
 
-  for (const [sira, model] of MODELLER.entries()) {
-    if (istek.signal.aborted) return hata("İstek iptal edildi.", 499);
-    const sure = sira === 0 ? ILK_MODEL_SURESI_MS : YEDEK_MODEL_SURESI_MS;
-    try {
-      basari = await modeliDene(ai, model, girdi, istek.signal, sure);
-      if (sira > 0) console.info(`Yedek model kullanıldı: ${model}`);
-      break;
-    } catch (e) {
-      const sebep = hatayiSiniflandir(e);
-      console.warn(`Model başarısız: ${model} → ${sebep.tur}`, sebep.ayrinti);
-      hatalar.push(sebep);
-      // Anahtar geçersiz veya istek bozuksa başka model denemenin anlamı yok.
-      if (sebep.tur === "anahtar" || sebep.tur === "istek") break;
+  while (!basari) {
+    for (const model of MODELLER) {
+      if (istek.signal.aborted) return hata("İstek iptal edildi.", 499);
+      const kalan = sonTarih - Date.now();
+      if (kalan < 3_000) break;
+      if (!yerAyir(model.ad, model.dakikalikLimit)) continue; // kotası dolu, sıradakine geç
+
+      try {
+        basari = await modeliDene(ai, model.ad, girdi, istek.signal, Math.min(model.sureMs, kalan));
+        if (model !== MODELLER[0]) console.info(`Yedek model kullanıldı: ${model.ad}`);
+        break;
+      } catch (e) {
+        const sebep = hatayiSiniflandir(e);
+        console.warn(`Model başarısız: ${model.ad} → ${sebep.tur}`, sebep.ayrinti);
+        hatalar.push(sebep);
+        // Anahtar geçersiz veya istek bozuksa başka model denemenin anlamı yok.
+        if (sebep.tur === "anahtar" || sebep.tur === "istek") return sonHata(hatalar);
+        dinlendir(model.ad, sebep.dinlenmeMs);
+      }
     }
+    if (basari) break;
+
+    // Hiçbir model müsait değil: en erken müsait olacak modeli bekle.
+    const enErken = Math.min(...MODELLER.map((m) => musaitOlana(m.ad, m.dakikalikLimit)));
+    const bekleme = Math.max(enErken, 500) + Math.random() * 500; // aynı anda bekleyenler üst üste binmesin
+    if (Date.now() + bekleme > sonTarih - 3_000) break;
+    if (!(await uyu(bekleme, istek.signal))) return hata("İstek iptal edildi.", 499);
   }
 
   if (!basari) return sonHata(hatalar);
@@ -124,7 +174,7 @@ export async function POST(istek: Request) {
   const kodlayici = new TextEncoder();
   const govdeAkisi = new ReadableStream<Uint8Array>({
     async start(kontrol) {
-      if (ilkParca) kontrol.enqueue(kodlayici.encode(ilkParca));
+      kontrol.enqueue(kodlayici.encode(ilkParca));
       try {
         while (true) {
           const parca = await sonrakiMetin(olaylar);
@@ -150,6 +200,24 @@ export async function POST(istek: Request) {
   });
 }
 
+type Basari = { olaylar: AsyncIterator<unknown>; ilkParca: string; iptal: AbortController };
+
+// Belirtilen süre kadar bekler. Kullanıcı isteği iptal ederse false döner.
+function uyu(ms: number, sinyal: AbortSignal): Promise<boolean> {
+  return new Promise((coz) => {
+    if (sinyal.aborted) return coz(false);
+    const zamanlayici = setTimeout(() => {
+      sinyal.removeEventListener("abort", iptalde);
+      coz(true);
+    }, ms);
+    const iptalde = () => {
+      clearTimeout(zamanlayici);
+      coz(false);
+    };
+    sinyal.addEventListener("abort", iptalde, { once: true });
+  });
+}
+
 // Tek bir modelle akışı başlatır ve ilk metin parçasını bekler.
 // Süre dolarsa veya model hata verirse hata fırlatır (bir sonraki model denenir).
 async function modeliDene(
@@ -158,7 +226,7 @@ async function modeliDene(
   girdi: Girdi,
   istekSinyali: AbortSignal,
   sureMs: number,
-) {
+): Promise<Basari> {
   const iptal = new AbortController();
   const kullaniciIptali = () => iptal.abort();
   istekSinyali.addEventListener("abort", kullaniciIptali);
@@ -226,21 +294,44 @@ class ZamanAsimiHatasi extends Error {
   }
 }
 
-type SebepliHata = { tur: "yogun" | "kota" | "anahtar" | "istek" | "diger"; ayrinti: string };
+type SebepliHata = {
+  tur: "yogun" | "kota" | "gunlukKota" | "anahtar" | "istek" | "diger";
+  ayrinti: string;
+  dinlenmeMs: number;
+};
 
-// Gemini'den gelen hatanın türünü belirler.
+// Gemini'den gelen hatanın türünü ve modelin ne kadar dinlendirileceğini belirler.
 function hatayiSiniflandir(e: unknown): SebepliHata {
   const ayrinti = e instanceof Error ? e.message.slice(0, 200) : String(e);
-  if (e instanceof ZamanAsimiHatasi) return { tur: "yogun", ayrinti };
+  if (e instanceof ZamanAsimiHatasi) return { tur: "yogun", ayrinti, dinlenmeMs: DINLENME_MS.zamanAsimi };
 
   const durum = (e as { status?: number })?.status;
   const kod = e instanceof GeminiAkisHatasi ? e.kod : undefined;
 
-  if (durum === 429 || kod === "resource_exhausted") return { tur: "kota", ayrinti };
-  if (durum === 401 || durum === 403) return { tur: "anahtar", ayrinti };
-  if (durum === 400) return { tur: "istek", ayrinti };
-  if (durum === 503 || kod === "service_unavailable") return { tur: "yogun", ayrinti };
-  return { tur: "diger", ayrinti }; // 404, 500 vb. → sıradaki model denenir
+  if (durum === 429 || kod === "resource_exhausted") {
+    // Google "Please retry in 51s" / "retry in 17h10m27s" gibi ne kadar bekleneceğini söylüyor.
+    const bekleMs = sureyiOku(ayrinti);
+    if (/per day/i.test(ayrinti)) {
+      // Günlük kota bitti: model ertesi güne kadar (en fazla 24 saat) kullanılmaz.
+      return { tur: "gunlukKota", ayrinti, dinlenmeMs: Math.min(bekleMs ?? 3_600_000, 86_400_000) };
+    }
+    return { tur: "kota", ayrinti, dinlenmeMs: Math.min(bekleMs ?? DINLENME_MS.kota, 120_000) };
+  }
+  if (durum === 401 || durum === 403) return { tur: "anahtar", ayrinti, dinlenmeMs: 0 };
+  if (durum === 400) return { tur: "istek", ayrinti, dinlenmeMs: 0 };
+  if (durum === 503 || kod === "service_unavailable") return { tur: "yogun", ayrinti, dinlenmeMs: DINLENME_MS.yogun };
+  return { tur: "diger", ayrinti, dinlenmeMs: DINLENME_MS.diger }; // 404, 500 vb.
+}
+
+// "retry in 17h10m27s" → milisaniye. Bulamazsa undefined.
+function sureyiOku(metin: string): number | undefined {
+  const m = /retry in ((?:\d+h)?(?:\d+m)?(?:[\d.]+s)?)/i.exec(metin)?.[1];
+  if (!m) return undefined;
+  const saat = Number(/(\d+)h/.exec(m)?.[1] ?? 0);
+  const dakika = Number(/(\d+)m/.exec(m)?.[1] ?? 0);
+  const saniye = Number(/([\d.]+)s/.exec(m)?.[1] ?? 0);
+  const ms = ((saat * 60 + dakika) * 60 + saniye) * 1000;
+  return ms > 0 ? ms : undefined;
 }
 
 // Hiçbir model cevap veremediyse kullanıcıya anlaşılır bir Türkçe mesaj döndürür.
@@ -248,8 +339,11 @@ function sonHata(hatalar: SebepliHata[]) {
   const turler = new Set(hatalar.map((h) => h.tur));
   if (turler.has("anahtar")) return hata("Sunucu ayarı hatalı: Gemini API anahtarı geçersiz.", 500);
   if (turler.has("istek")) return hata("İstek işlenemedi, lütfen sorunu farklı yazıp tekrar dene.", 400);
-  if (turler.size === 1 && turler.has("kota")) {
-    return hata("Ücretsiz kullanım sınırına ulaşıldı. Lütfen biraz sonra tekrar deneyin.", 429);
+  if (turler.has("gunlukKota") && hatalar[hatalar.length - 1]?.tur === "gunlukKota") {
+    return hata(
+      "Asistanın bugünkü ücretsiz kullanım hakkı doldu. Her gün Türkiye saatiyle 10:00–11:00 arasında yenilenir.",
+      503,
+    );
   }
-  return hata("Asistan şu an çok yoğun, lütfen birazdan tekrar deneyin.", 503);
+  return hata("Asistan şu an çok yoğun, lütfen birazdan tekrar deneyin.", 503, { "Retry-After": "30" });
 }

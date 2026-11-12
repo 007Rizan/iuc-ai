@@ -12,12 +12,29 @@ const ORNEK_SORULAR = [
 ];
 
 const MAKS_UZUNLUK = 4000; // API'deki sınırla aynı
+const GECMIS_MESAJ_SAYISI = 8; // API'ye gönderilen son mesaj sayısı (API'deki sınırla aynı)
+const SIRA_UYARISI_MS = 6000; // cevap bu süreden uzun sürerse "sıradasın" yazısı çıkar
+
+// Kişi başı hız sınırı için bu tarayıcıya özel rastgele bir kimlik (kişisel bilgi içermez).
+function tarayiciKimligi(): string {
+  try {
+    let kimlik = localStorage.getItem("iuc-ai-kimlik");
+    if (!kimlik) {
+      kimlik = crypto.randomUUID();
+      localStorage.setItem("iuc-ai-kimlik", kimlik);
+    }
+    return kimlik;
+  } catch {
+    return ""; // gizli sekme vb. → sunucu IP adresine göre sınırlar
+  }
+}
 
 export default function Sohbet() {
   const [mesajlar, setMesajlar] = useState<Mesaj[]>([]);
   const [girdi, setGirdi] = useState("");
   const [yukleniyor, setYukleniyor] = useState(false);
   const [hata, setHata] = useState<string | null>(null);
+  const [uzunSurdu, setUzunSurdu] = useState(false);
 
   const iptalRef = useRef<AbortController | null>(null);
   const oturumRef = useRef(0); // "Yeni sohbet"e basılınca eski isteğin sonucu ekrana yazılmasın diye
@@ -59,8 +76,8 @@ export default function Sohbet() {
     try {
       const cevap = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: gonderilecek.slice(-20) }),
+        headers: { "Content-Type": "application/json", "X-Istemci-Kimlik": tarayiciKimligi() },
+        body: JSON.stringify({ messages: gonderilecek.slice(-GECMIS_MESAJ_SAYISI) }),
         signal: iptal.signal,
       });
 
@@ -129,6 +146,16 @@ export default function Sohbet() {
   const sonMesaj = mesajlar[mesajlar.length - 1];
   const yaziyor = yukleniyor && sonMesaj?.role === "assistant" && sonMesaj.content === "";
 
+  // Cevap uzun süre gelmezse "sıradasın" yazısını göster.
+  useEffect(() => {
+    if (!yaziyor) return;
+    const zamanlayici = setTimeout(() => setUzunSurdu(true), SIRA_UYARISI_MS);
+    return () => {
+      clearTimeout(zamanlayici);
+      setUzunSurdu(false);
+    };
+  }, [yaziyor]);
+
   return (
     <div className="flex h-dvh flex-col bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       {/* Üst bar */}
@@ -194,12 +221,17 @@ export default function Sohbet() {
           )}
 
           {yaziyor && (
-            <div className="flex justify-start" aria-label="Asistan yazıyor">
+            <div className="flex flex-col items-start gap-1.5" aria-label="Asistan yazıyor">
               <div className="flex gap-1 rounded-2xl rounded-bl-md border border-zinc-200 bg-white px-4 py-3.5 dark:border-zinc-800 dark:bg-zinc-900">
                 <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400 [animation-delay:-0.3s]" />
                 <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400 [animation-delay:-0.15s]" />
                 <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400" />
               </div>
+              {uzunSurdu && (
+                <p role="status" className="px-1 text-xs text-zinc-500 dark:text-zinc-400">
+                  Şu an yoğunluk var, sıradasın. Cevabın birazdan gelecek…
+                </p>
+              )}
             </div>
           )}
 
