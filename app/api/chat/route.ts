@@ -18,12 +18,14 @@ export const maxDuration = 60;
 // - dakikalikLimit: Google'ın ücretsiz katmandaki dakikalık istek sınırı.
 //   3.5-flash-lite: 15/dk (Google'ın 429 hata mesajından). 3.1-flash-lite: bilinmiyor, 15 varsayıldı.
 // - sureMs: ilk kelime bu süre içinde gelmezse model "yoğun" sayılır, sıradakine geçilir.
-// Ölçümler (12.11.2026): 3.5-flash-lite güvenilir; 3.1-flash-lite sık sık cevap vermiyor (yedek).
+// Ölçüm (npm run test:gecikme, belgeli ~8000 karakterlik talimat, minimal düşünme):
+//   3.1-flash-lite ilk kelime ~1,5 sn; 3.5-flash-lite ~9,5 sn (cevaptan önceki "düşünme" adımı uzun).
+//   3.1-flash-lite yoğun saatlerde zaman zaman hiç cevap vermiyor → kısa süre sınırı, takılırsa yedeğe.
 // gemini-3.8-flash çıkarıldı: ücretsiz katmanda sadece 5/dk ve 20/gün.
-// Kapasite ≈ dakikada 15 soru (+ yedek müsaitse biraz fazlası).
+// İki modelin kotası ayrı: kapasite ≈ dakikada 30 soru.
 const MODELLER = [
-  { ad: "gemini-3.5-flash-lite", dakikalikLimit: 15, sureMs: 15_000 },
-  { ad: "gemini-3.1-flash-lite", dakikalikLimit: 15, sureMs: 8_000 },
+  { ad: "gemini-3.1-flash-lite", dakikalikLimit: 15, sureMs: 6_000 },
+  { ad: "gemini-3.5-flash-lite", dakikalikLimit: 15, sureMs: 20_000 },
 ];
 
 // Bütün modellerin kotası doluysa en fazla bu kadar sırada bekletilir (maxDuration'ın altında kalmalı).
@@ -46,9 +48,13 @@ const MAKS_MESAJ_UZUNLUGU = 4_000; // karakter
 // Asistana her soruda verilecek belge parçası sayısı (ölçüm: doğru madde 22/22 soruda ilk 6'da).
 const PARCA_SAYISI = 6;
 
+// Gemini'nin cevap öncesi düşünme derinliği: "minimal" | "low" | "medium" | "high".
+const DUSUNME_SEVIYESI = (process.env.GEMINI_DUSUNME || "minimal") as "minimal" | "low" | "medium" | "high";
+
 const KIMLIK = `Sen "İÜC AI" adında, İstanbul Üniversitesi-Cerrahpaşa (İÜC) öğrencilerine yardım eden gayriresmî bir öğrenci asistanısın.
 Üniversitenin resmi bir hizmeti değilsin; gerekirse bunu belirt.
-Her zaman Türkçe, kısa, net ve samimi cevap ver. Kendini sadece sorulursa tanıt; doğrudan soruya cevap ver.
+Her zaman Türkçe, kısa, net ve samimi cevap ver.
+Cevaba selamlaşarak veya kendini tanıtarak BAŞLAMA; doğrudan soruya cevap ver. Kendini sadece "sen kimsin" gibi sorulursa tanıt.
 Düz metin yaz: Markdown işaretleri (**, #, tablo) kullanma; liste gerekiyorsa satır başına "- " koy.`;
 
 // 2. Aşama: cevaplar SADECE veritabanından bulunan belge parçalarına dayanır.
@@ -199,11 +205,20 @@ export async function POST(istek: Request) {
 
   // Önbellek: aynı soru daha önce cevaplandıysa ve cevap hâlâ geçerliyse Gemini'ye sormadan ver.
   // (Hangi soruların saklanacağı ve ne kadar geçerli olacağı: lib/onbellekKurallari.ts)
+  // Hangi adımın ne kadar sürdüğü (Server-Timing başlığında görünür; yavaşlık teşhisi için).
+  const sure: Record<string, number> = {};
+  let t = Date.now();
+  const olc = (ad: string) => {
+    sure[ad] = Date.now() - t;
+    t = Date.now();
+  };
+
   const surum = await onbellekSurumu();
   const onbellek = surum ? onbellekBilgisi(mesajlar, surum, new Date()) : null;
   if (onbellek) {
     const kayitli = await onbellektenGetir(onbellek);
-    if (kayitli) return metinCevabi(new TextEncoder().encode(kayitli), "HIT");
+    olc("onbellek");
+    if (kayitli) return metinCevabi(new TextEncoder().encode(kayitli), "HIT", sure);
   }
 
   const ai = new GoogleGenAI({ apiKey });
@@ -214,6 +229,7 @@ export async function POST(istek: Request) {
   let parcalar: BulunanParca[] | null;
   try {
     parcalar = await belgeAra(ai, sorular.slice(-2).join("\n"), PARCA_SAYISI);
+    olc("arama");
   } catch (e) {
     // Belge bulunamadan cevap verirsek "bilgim yok" der; bu yanıltıcı olur. Yoğunluk mesajı daha dürüst.
     console.error("Belge araması başarısız:", e instanceof Error ? e.message : e);
@@ -257,6 +273,7 @@ export async function POST(istek: Request) {
   }
 
   if (!basari) return sonHata(hatalar);
+  olc("ilk_kelime");
   const { olaylar, ilkParca, iptal, model: kullanilanModel } = basari;
 
   // Cevabı geldikçe tarayıcıya ilet; aynı anda önbellek için tamamını biriktir.
@@ -308,17 +325,25 @@ export async function POST(istek: Request) {
     });
   }
 
-  return metinCevabi(govdeAkisi, onbellek ? "MISS" : "YOK");
+  return metinCevabi(govdeAkisi, onbellek ? "MISS" : "YOK", { ...sure, [`model_${kullanilanModel}`]: 0 });
 }
 
 // Düz metin cevabı. X-Onbellek başlığı test için: HIT = önbellekten, MISS = Gemini'den (kaydedilecek),
 // YOK = bu soru önbelleğe uygun değil.
-function metinCevabi(govde: ReadableStream<Uint8Array> | Uint8Array<ArrayBuffer>, onbellekDurumu: "HIT" | "MISS" | "YOK") {
+function metinCevabi(
+  govde: ReadableStream<Uint8Array> | Uint8Array<ArrayBuffer>,
+  onbellekDurumu: "HIT" | "MISS" | "YOK",
+  sure: Record<string, number> = {},
+) {
+  const zamanlama = Object.entries(sure)
+    .map(([ad, ms]) => `${ad.replace(/[^a-zA-Z0-9_-]/g, "_")};dur=${ms}`)
+    .join(", ");
   return new Response(govde, {
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
       "Cache-Control": "no-store",
       "X-Onbellek": onbellekDurumu,
+      "Server-Timing": zamanlama,
     },
   });
 }
@@ -365,6 +390,9 @@ async function modeliDene(
       {
         model,
         system_instruction: sistemTalimati,
+        // Gemini 3.x cevap yazmadan önce "düşünüyor"; belgeli uzun talimatla ilk kelime 12-19 sn sürüyordu.
+        // Belgeden bilgi aktarmak için derin düşünme gerekmiyor.
+        generation_config: { thinking_level: DUSUNME_SEVIYESI },
         input: girdi,
         stream: true,
         store: false, // konuşmalar Google tarafında saklanmasın
@@ -391,17 +419,32 @@ async function sonrakiMetin(olaylar: AsyncIterator<unknown>): Promise<string> {
     if (done) return "";
     const olay = value as {
       event_type?: string;
+      status?: string;
+      interaction?: { status?: string };
       delta?: { type?: string; text?: string };
       error?: { code?: string; message?: string };
     };
     if (olay.event_type === "error") {
       throw new GeminiAkisHatasi(olay.error?.code, olay.error?.message);
     }
+    // Akış hata olayı olmadan da "başarısız/eksik" bitebiliyor (ör. yoğunlukta cevap yarıda bırakılıyor).
+    // Bunu normal bitiş sanarsak yarım cevap tam gibi gösterilir ve önbelleğe yazılır.
+    const durum =
+      olay.event_type === "interaction.status_update"
+        ? olay.status
+        : olay.event_type === "interaction.completed"
+          ? olay.interaction?.status
+          : undefined;
+    if (durum && BASARISIZ_DURUMLAR.has(durum)) {
+      throw new GeminiAkisHatasi(durum, `Gemini cevabı tamamlanamadı (durum: ${durum})`);
+    }
     if (olay.event_type === "step.delta" && olay.delta?.type === "text" && olay.delta.text) {
       return olay.delta.text;
     }
   }
 }
+
+const BASARISIZ_DURUMLAR = new Set(["failed", "cancelled", "incomplete", "budget_exceeded"]);
 
 class GeminiAkisHatasi extends Error {
   constructor(

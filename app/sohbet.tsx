@@ -66,7 +66,11 @@ function AsistanMesaji({ icerik }: { icerik: string }) {
 
 const MAKS_UZUNLUK = 4000; // API'deki sınırla aynı
 const GECMIS_MESAJ_SAYISI = 8; // API'ye gönderilen son mesaj sayısı (API'deki sınırla aynı)
-const SIRA_UYARISI_MS = 6000; // cevap bu süreden uzun sürerse "sıradasın" yazısı çıkar
+// Cevap beklerken gösterilen durum yazıları: önce "inceleniyor", uzarsa "yoğunluk var".
+const BEKLEME_YAZILARI: [number, string][] = [
+  [3_000, "Belgeler inceleniyor…"],
+  [20_000, "Şu an yoğunluk var, sıradasın. Cevabın birazdan gelecek…"],
+];
 
 // Kişi başı hız sınırı için bu tarayıcıya özel rastgele bir kimlik (kişisel bilgi içermez).
 function tarayiciKimligi(): string {
@@ -87,7 +91,7 @@ export default function Sohbet() {
   const [girdi, setGirdi] = useState("");
   const [yukleniyor, setYukleniyor] = useState(false);
   const [hata, setHata] = useState<string | null>(null);
-  const [uzunSurdu, setUzunSurdu] = useState(false);
+  const [beklemeYazisi, setBeklemeYazisi] = useState<string | null>(null);
 
   const iptalRef = useRef<AbortController | null>(null);
   const oturumRef = useRef(0); // "Yeni sohbet"e basılınca eski isteğin sonucu ekrana yazılmasın diye
@@ -204,13 +208,13 @@ export default function Sohbet() {
   const sonMesaj = mesajlar[mesajlar.length - 1];
   const yaziyor = yukleniyor && sonMesaj?.role === "assistant" && sonMesaj.content === "";
 
-  // Cevap uzun süre gelmezse "sıradasın" yazısını göster.
+  // Cevap gecikirse sırayla durum yazılarını göster.
   useEffect(() => {
     if (!yaziyor) return;
-    const zamanlayici = setTimeout(() => setUzunSurdu(true), SIRA_UYARISI_MS);
+    const zamanlayicilar = BEKLEME_YAZILARI.map(([ms, yazi]) => setTimeout(() => setBeklemeYazisi(yazi), ms));
     return () => {
-      clearTimeout(zamanlayici);
-      setUzunSurdu(false);
+      zamanlayicilar.forEach(clearTimeout);
+      setBeklemeYazisi(null);
     };
   }, [yaziyor]);
 
@@ -286,9 +290,9 @@ export default function Sohbet() {
                 <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400 [animation-delay:-0.15s]" />
                 <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400" />
               </div>
-              {uzunSurdu && (
+              {beklemeYazisi && (
                 <p role="status" className="px-1 text-xs text-zinc-500 dark:text-zinc-400">
-                  Şu an yoğunluk var, sıradasın. Cevabın birazdan gelecek…
+                  {beklemeYazisi}
                 </p>
               )}
             </div>
