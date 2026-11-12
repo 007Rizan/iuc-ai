@@ -7,6 +7,7 @@
 export const KAYNAK_AYIRICI = "\n\n␞KAYNAKLAR␞"; // ␞ normal metinde geçmeyen bir işaret
 
 export type Kaynak = {
+  tur?: "belge" | "web"; // belge: yüklü resmi belge (madde); web: İÜC sitesindeki sayfa/duyuru
   no: number; // listede gösterilen numara (cevaptaki ilk [no] işareti)
   numaralar: number[]; // bu kaynağa işaret eden bütün [n]'ler (aynı maddenin farklı parçaları olabilir)
   belge: string; // "İÜC Önlisans ve Lisans Eğitim ve Öğretim Yönetmeliği"
