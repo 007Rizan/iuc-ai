@@ -1,0 +1,3 @@
+# Vercel aracıyla yüklenmeyecek dosyalar. Anahtarlar Vercel ayarlarında (Environment Variables).
+.env*
+!.env.example
