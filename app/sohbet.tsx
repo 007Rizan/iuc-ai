@@ -2,7 +2,7 @@
 // Sohbet ekranı. "use client" = bu bileşen tarayıcıda çalışır (tıklama, yazma gibi etkileşimler için gerekli).
 
 import { useEffect, useRef, useState } from "react";
-import { cevabiAyir } from "@/lib/kaynaklar";
+import { cevabiAyir, isaretNumaralari, type Kaynak } from "@/lib/kaynaklar";
 
 type Mesaj = { role: "user" | "assistant"; content: string };
 
@@ -17,24 +17,26 @@ function AsistanMesaji({ icerik }: { icerik: string }) {
   const { metin, kaynaklar } = cevabiAyir(icerik);
   return (
     <>
-      {metin.split(/(\[\d{1,2}\])/g).map((parca, i) => {
-        const no = /^\[(\d{1,2})\]$/.exec(parca)?.[1];
-        if (!no) return <span key={i}>{parca}</span>;
-        const k = kaynaklar.find((k) => k.numaralar.includes(Number(no)));
+      {metin.split(/(\[\d{1,2}(?:\s*,\s*\d{1,2})*\])/g).map((parca, i) => {
+        if (!/^\[\d/.test(parca)) return <span key={i}>{parca}</span>;
         // Kaynak listesi henüz gelmediyse (cevap akarken) işaret olduğu gibi kalır.
-        if (!k) return kaynaklar.length ? null : <span key={i} className="text-zinc-400">{parca}</span>;
-        return (
+        if (!kaynaklar.length) return <span key={i} className="text-zinc-400">{parca}</span>;
+        // "[4, 6]" → iki rozet; aynı kaynağa giden numaralar tek rozet; var olmayan numara gösterilmez.
+        const bulunan = isaretNumaralari(parca)
+          .map((no) => kaynaklar.find((k) => k.numaralar.includes(no)))
+          .filter((k, j, dizi): k is Kaynak => !!k && dizi.indexOf(k) === j);
+        return bulunan.map((k) => (
           <a
-            key={i}
+            key={`${i}-${k.no}`}
             href={k.url}
             target="_blank"
             rel="noopener noreferrer"
-            title={`${k.etiket}${k.baslik ? ` – ${k.baslik}` : ""}`}
+            title={k.tur === "web" ? k.belge : `${k.etiket}${k.baslik ? ` – ${k.baslik}` : ""}`}
             className="mx-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded bg-indigo-100 px-1 align-super text-[10px] font-semibold text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-900/60 dark:text-indigo-300 dark:hover:bg-indigo-900"
           >
             {k.no}
           </a>
-        );
+        ));
       })}
       {kaynaklar.length > 0 && (
         <div className="mt-3 whitespace-normal border-t border-zinc-200 pt-2 text-xs leading-relaxed text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">

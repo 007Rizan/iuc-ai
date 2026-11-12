@@ -50,3 +50,11 @@ test("Tavily tarihleri Türkçe biçime çevrilir", () => {
   assert.equal(turkceTarih(null), null);
   assert.equal(turkceTarih("geçersiz"), null);
 });
+
+test("arama sorgusu: soru kalıpları atılır, anahtar kelimeler ve yıllar kalır", async () => {
+  const { aramaSorgusu } = await import("./webArama.ts");
+  assert.equal(aramaSorgusu("Yatay geçiş sonuçları açıklandı mı?"), "yatay geçiş sonuçları");
+  assert.equal(aramaSorgusu("2025-2026 akademik takvimine göre ara sınavlar ne zaman?"), "2025-2026 akademik takvimine ara sınavlar");
+  assert.equal(aramaSorgusu("İÜC'de Erasmus başvurusu nasıl yapılır?"), "iüc'de erasmus başvurusu");
+  assert.equal(aramaSorgusu("ne zaman?"), "ne zaman?"); // her şey atılırsa soru olduğu gibi kalır
+});

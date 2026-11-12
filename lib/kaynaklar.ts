@@ -29,8 +29,16 @@ export function cevabiAyir(icerik: string): { metin: string; kaynaklar: Kaynak[]
   }
 }
 
-/** Cevap metninde geçen [1], [2] gibi kaynak numaralarını sırasıyla döndürür. */
+// Cevaptaki kaynak işaretleri: [3] veya [4, 6, 7] (Gemini bazen birden fazla numarayı tek parantezde yazıyor).
+export const KAYNAK_ISARETI = /\[(\d{1,2}(?:\s*,\s*\d{1,2})*)\]/g;
+
+/** "[4, 6, 7]" → [4, 6, 7] */
+export function isaretNumaralari(isaret: string): number[] {
+  return (isaret.match(/\d{1,2}/g) ?? []).map(Number);
+}
+
+/** Cevap metninde geçen [1], [2, 5] gibi kaynak numaralarını sırasıyla (tekrarsız) döndürür. */
 export function kullanilanNumaralar(metin: string): number[] {
-  const numaralar = [...metin.matchAll(/\[(\d{1,2})\]/g)].map((m) => Number(m[1]));
+  const numaralar = [...metin.matchAll(KAYNAK_ISARETI)].flatMap((m) => isaretNumaralari(m[1]));
   return [...new Set(numaralar)];
 }

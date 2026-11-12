@@ -132,3 +132,9 @@ test("cevap kaydedilebilir mi", () => {
   assert.ok(!cevapKaydedilebilirMi("Yarım cevap\n\n⚠️ Cevap yarıda kesildi, lütfen tekrar deneyin."));
   assert.ok(!cevapKaydedilebilirMi("a".repeat(8001)));
 });
+
+test("kaynak işaretleri: [3], [4, 6, 7] ve [2][5] biçimleri", async () => {
+  const { kullanilanNumaralar } = await import("./kaynaklar.ts");
+  assert.deepEqual(kullanilanNumaralar("A [3]. B [4, 6, 7]. C [2][5]. Tekrar [3]."), [3, 4, 6, 7, 2, 5]);
+  assert.deepEqual(kullanilanNumaralar("2025-2026 [yıl] dizisi [a]"), []);
+});

@@ -40,6 +40,29 @@ export function webAramasiGerekli(soru: string, enIyiBenzerlik: number): { gerek
   return { gerekli: false, sebep: "belge_yeterli" };
 }
 
+// Arama motoru sorgusundan atılan soru kalıpları ve dolgu kelimeleri. Ölçüm: "2025-2026 akademik
+// takvimine göre ara sınavlar ne zaman?" → en iyi sonuç puanı 0,10 (alakasız); "2025-2026 akademik
+// takvim ara sınav" → 0,77 (doğru takvimler). Üniversite adı da atılır (arama zaten iuc.edu.tr'de).
+const SORU_KALIPLARI = new Set(
+  (
+    "mı mi mu mü mıdır midir mudur müdür mısın misin musun müsün ne neler nedir nelerdir nasıl nereden nerede " +
+    "nereye zaman kaç kaçta hangi hangisi kim kimler var yok acaba lütfen göre için ile hakkında bilgi " +
+    "ver verir verebilir söyle söyler söyleyebilir misiniz bana benim ben sen biz yapılır yapılıyor yapabilirim " +
+    "olur olacak oldu açıklandı açıklanacak açıklanır gerekiyor gerekir lazım istiyorum öğrenmek " +
+    "iüc iuc istanbul üniversitesi üniversitesi'nin cerrahpaşa cerrahpaşa'nın üniversite okul okulun"
+  ).split(" "),
+);
+
+/** Soruyu arama motoruna uygun anahtar kelimelere çevirir: "Yatay geçiş sonuçları açıklandı mı?" → "yatay geçiş sonuçları". */
+export function aramaSorgusu(soru: string): string {
+  const kelimeler = soru
+    .toLocaleLowerCase("tr-TR")
+    .replace(/[^\p{L}\p{N}'\-\s]/gu, " ")
+    .split(/\s+/)
+    .filter((k) => k && !SORU_KALIPLARI.has(k));
+  return kelimeler.join(" ").trim() || soru.trim();
+}
+
 /** Öğrenci no / TC kimlik no, e-posta ve cep telefonu kalıplarını siler (KVKK). */
 export function kisiselBilgiyiTemizle(metin: string): string {
   return metin
@@ -85,7 +108,7 @@ export async function webAra(sorgu: string): Promise<WebAramaSonucu> {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${anahtar}` },
       body: JSON.stringify({
-        query: sorgu.slice(0, 380),
+        query: aramaSorgusu(sorgu).slice(0, 380),
         include_domains: ["iuc.edu.tr"],
         search_depth: "basic", // 1 kredi
         max_results: 8,
