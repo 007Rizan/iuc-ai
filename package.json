@@ -9,7 +9,9 @@
     "lint": "eslint",
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test lib/",
     "test:arama": "node --env-file=.env.local --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/aramaTesti.ts",
-    "test:gecikme": "node --env-file=.env.local --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/gecikmeTesti.ts"
+    "test:gecikme": "node --env-file=.env.local --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/gecikmeTesti.ts",
+    "test:esik": "node --env-file=.env.local --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/esikTesti.ts",
+    "test:tavily": "node --env-file=.env.local --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/tavilyTesti.ts"
   },
   "dependencies": {
     "@google/genai": "^3.2.0",
