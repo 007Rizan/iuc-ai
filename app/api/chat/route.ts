@@ -5,6 +5,9 @@
 import { GoogleGenAI } from "@google/genai";
 import { dinlendir, musaitOlana, yerAyir } from "@/lib/modelKotasi";
 import { hizKontrol } from "@/lib/hizSiniri";
+import { after } from "next/server";
+import { cevapKaydedilebilirMi, onbellekBilgisi, surumHesapla } from "@/lib/onbellekKurallari";
+import { onbellegeKaydet, onbellektenGetir } from "@/lib/onbellek";
 
 // Vercel'de bu fonksiyonun en fazla kaç saniye çalışabileceği.
 export const maxDuration = 60;
@@ -48,6 +51,11 @@ Henüz yönetmelik, akademik takvim, ÇAP/yandal, Erasmus veya başka hiçbir ü
 işlemleriyle ilgili HER soruda: genel bilgi, tahmin, "genellikle şöyledir" gibi açıklamalar dahil hiçbir
 bilgi verme. Bu sorulara SADECE şunu yaz: "Bu konuda bilgim yok, öğrenci işlerine danışın."
 Genel sohbet, selamlaşma ve "ne yapabilirsin" gibi sorularda normal şekilde yardımcı olabilirsin.`;
+
+// Belge sürümü: 2. Aşama'da belgeler güncellendiğinde artırılır. Bu veya sistem talimatı değişince
+// önbellekteki eski cevaplar kendiliğinden kullanılmaz olur (kayıt anahtarları değişir).
+const BELGE_SURUMU = "1";
+const ONBELLEK_SURUMU = surumHesapla(SISTEM_TALIMATI, BELGE_SURUMU);
 
 type Mesaj = { role: "user" | "assistant"; content: string };
 
@@ -129,6 +137,14 @@ export async function POST(istek: Request) {
     });
   }
 
+  // Önbellek: aynı soru daha önce cevaplandıysa ve cevap hâlâ geçerliyse Gemini'ye sormadan ver.
+  // (Hangi soruların saklanacağı ve ne kadar geçerli olacağı: lib/onbellekKurallari.ts)
+  const onbellek = onbellekBilgisi(mesajlar, ONBELLEK_SURUMU, new Date());
+  if (onbellek) {
+    const kayitli = await onbellektenGetir(onbellek);
+    if (kayitli) return metinCevabi(new TextEncoder().encode(kayitli), "HIT");
+  }
+
   const ai = new GoogleGenAI({ apiKey });
   const girdi = girdiOlustur(mesajlar);
 
@@ -168,9 +184,14 @@ export async function POST(istek: Request) {
   }
 
   if (!basari) return sonHata(hatalar);
-  const { olaylar, ilkParca, iptal } = basari;
+  const { olaylar, ilkParca, iptal, model: kullanilanModel } = basari;
 
-  // Cevabı geldikçe tarayıcıya ilet.
+  // Cevabı geldikçe tarayıcıya ilet; aynı anda önbellek için tamamını biriktir.
+  let tumCevap = ilkParca;
+  let tamamlandi = false; // cevap sonuna kadar sorunsuz geldi mi?
+  let akisBitti = () => {};
+  const bitti = new Promise<void>((coz) => (akisBitti = coz));
+
   const kodlayici = new TextEncoder();
   const govdeAkisi = new ReadableStream<Uint8Array>({
     async start(kontrol) {
@@ -179,28 +200,50 @@ export async function POST(istek: Request) {
         while (true) {
           const parca = await sonrakiMetin(olaylar);
           if (parca === "") break; // akış bitti
+          tumCevap += parca;
           kontrol.enqueue(kodlayici.encode(parca));
         }
+        tamamlandi = true;
       } catch (e) {
         console.error("Gemini akışı yarıda kesildi:", e);
         kontrol.enqueue(kodlayici.encode("\n\n⚠️ Cevap yarıda kesildi, lütfen tekrar deneyin."));
+      } finally {
+        kontrol.close();
+        akisBitti();
       }
-      kontrol.close();
     },
     cancel() {
-      iptal.abort();
+      iptal.abort(); // kullanıcı "Durdur"a bastı veya sayfayı kapattı → cevap kaydedilmez
+      akisBitti();
     },
   });
 
-  return new Response(govdeAkisi, {
+  // Cevap kullanıcıya gönderildikten sonra (bekletmeden) önbelleğe yaz.
+  if (onbellek) {
+    after(async () => {
+      await bitti;
+      if (tamamlandi && cevapKaydedilebilirMi(tumCevap)) {
+        await onbellegeKaydet(onbellek, tumCevap, kullanilanModel);
+      }
+    });
+  }
+
+  return metinCevabi(govdeAkisi, onbellek ? "MISS" : "YOK");
+}
+
+// Düz metin cevabı. X-Onbellek başlığı test için: HIT = önbellekten, MISS = Gemini'den (kaydedilecek),
+// YOK = bu soru önbelleğe uygun değil.
+function metinCevabi(govde: ReadableStream<Uint8Array> | Uint8Array<ArrayBuffer>, onbellekDurumu: "HIT" | "MISS" | "YOK") {
+  return new Response(govde, {
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
       "Cache-Control": "no-store",
+      "X-Onbellek": onbellekDurumu,
     },
   });
 }
 
-type Basari = { olaylar: AsyncIterator<unknown>; ilkParca: string; iptal: AbortController };
+type Basari = { olaylar: AsyncIterator<unknown>; ilkParca: string; iptal: AbortController; model: string };
 
 // Belirtilen süre kadar bekler. Kullanıcı isteği iptal ederse false döner.
 function uyu(ms: number, sinyal: AbortSignal): Promise<boolean> {
@@ -250,7 +293,7 @@ async function modeliDene(
     const olaylar = akis[Symbol.asyncIterator]();
     const ilkParca = await sonrakiMetin(olaylar);
     if (ilkParca === "") throw new GeminiAkisHatasi("bos_cevap", "Model boş cevap döndürdü");
-    return { olaylar, ilkParca, iptal };
+    return { olaylar, ilkParca, iptal, model };
   } catch (e) {
     iptal.abort(); // yarım kalan bağlantıyı kapat
     throw zamanAsimi ? new ZamanAsimiHatasi(model) : e;
