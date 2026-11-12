@@ -44,3 +44,7 @@ next-env.d.ts
 
 # Örnek ayar dosyası (değer içermez) commit edilir
 !.env.example
+
+# Python sanal ortamı
+ingest/.venv/
+__pycache__/
