@@ -9,15 +9,23 @@ import type { OnbellekBilgisi } from "./onbellekKurallari";
 const OKUMA_SURESI_MS = 2_000; // önbellek bundan uzun sürerse beklemeden Gemini'ye git
 const TEMIZLIK_OLASILIGI = 0.05; // her 20 kayıttan birinde süresi dolmuş kayıtlar silinir
 
-let istemci: SupabaseClient | null | undefined;
+let istemci: SupabaseClient | null = null;
+let uyariVerildi = false;
 
 function istemciAl(): SupabaseClient | null {
-  if (istemci !== undefined) return istemci;
+  if (istemci) return istemci;
   const url = process.env.SUPABASE_URL;
   const anahtar = process.env.SUPABASE_SECRET_KEY;
-  if (!url || !anahtar) {
-    console.info("Cevap önbelleği kapalı: SUPABASE_URL / SUPABASE_SECRET_KEY tanımlı değil.");
-    istemci = null;
+  if (!url || !anahtar || anahtar.startsWith("sb_publishable_")) {
+    // Her istekte tekrar bakılır: ayarlar sonradan eklenirse önbellek kendiliğinden açılır.
+    if (!uyariVerildi) {
+      console.info(
+        anahtar?.startsWith("sb_publishable_")
+          ? "Cevap önbelleği kapalı: SUPABASE_SECRET_KEY olarak publishable anahtar girilmiş, secret anahtar gerekli."
+          : "Cevap önbelleği kapalı: SUPABASE_URL / SUPABASE_SECRET_KEY tanımlı değil.",
+      );
+      uyariVerildi = true;
+    }
     return null;
   }
   istemci = createClient(url, anahtar, { auth: { persistSession: false, autoRefreshToken: false } });
