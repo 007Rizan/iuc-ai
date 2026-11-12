@@ -2,14 +2,67 @@
 // Sohbet ekranı. "use client" = bu bileşen tarayıcıda çalışır (tıklama, yazma gibi etkileşimler için gerekli).
 
 import { useEffect, useRef, useState } from "react";
+import { cevabiAyir } from "@/lib/kaynaklar";
 
 type Mesaj = { role: "user" | "assistant"; content: string };
 
 const ORNEK_SORULAR = [
-  "Merhaba! Neler yapabiliyorsun?",
   "Bütünleme sınavına kimler girebilir?",
-  "Erasmus başvurusu nasıl yapılır?",
+  "DD aldım, dersi geçmiş sayılır mıyım?",
+  "Kayıt dondurma şartları neler?",
 ];
+
+// Asistan cevabı: [1] gibi işaretler tıklanabilir rozet olur, altta kaynak listesi gösterilir.
+function AsistanMesaji({ icerik }: { icerik: string }) {
+  const { metin, kaynaklar } = cevabiAyir(icerik);
+  return (
+    <>
+      {metin.split(/(\[\d{1,2}\])/g).map((parca, i) => {
+        const no = /^\[(\d{1,2})\]$/.exec(parca)?.[1];
+        if (!no) return <span key={i}>{parca}</span>;
+        const k = kaynaklar.find((k) => k.numaralar.includes(Number(no)));
+        // Kaynak listesi henüz gelmediyse (cevap akarken) işaret olduğu gibi kalır.
+        if (!k) return kaynaklar.length ? null : <span key={i} className="text-zinc-400">{parca}</span>;
+        return (
+          <a
+            key={i}
+            href={k.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={`${k.etiket}${k.baslik ? ` – ${k.baslik}` : ""}`}
+            className="mx-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded bg-indigo-100 px-1 align-super text-[10px] font-semibold text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-900/60 dark:text-indigo-300 dark:hover:bg-indigo-900"
+          >
+            {k.no}
+          </a>
+        );
+      })}
+      {kaynaklar.length > 0 && (
+        <div className="mt-3 whitespace-normal border-t border-zinc-200 pt-2 text-xs leading-relaxed text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">
+          <p className="mb-1 font-medium text-zinc-700 dark:text-zinc-300">Kaynaklar</p>
+          <ol className="space-y-1">
+            {kaynaklar.map((k) => (
+              <li key={k.no} className="flex gap-1.5">
+                <span className="font-semibold text-indigo-700 dark:text-indigo-300">[{k.no}]</span>
+                <span>
+                  <a
+                    href={k.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline decoration-zinc-300 underline-offset-2 hover:text-indigo-700 dark:decoration-zinc-600 dark:hover:text-indigo-300"
+                  >
+                    {k.belge} – {k.etiket}
+                    {k.baslik ? ` (${k.baslik})` : ""}
+                  </a>
+                  {k.gecerlilik && <span> · {k.gecerlilik}</span>}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+    </>
+  );
+}
 
 const MAKS_UZUNLUK = 4000; // API'deki sınırla aynı
 const GECMIS_MESAJ_SAYISI = 8; // API'ye gönderilen son mesaj sayısı (API'deki sınırla aynı)
@@ -77,7 +130,12 @@ export default function Sohbet() {
       const cevap = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Istemci-Kimlik": tarayiciKimligi() },
-        body: JSON.stringify({ messages: gonderilecek.slice(-GECMIS_MESAJ_SAYISI) }),
+        // Önceki cevapların kaynak listesi sunucuya geri gönderilmez, sadece metinleri.
+        body: JSON.stringify({
+          messages: gonderilecek
+            .slice(-GECMIS_MESAJ_SAYISI)
+            .map((m) => (m.role === "assistant" ? { ...m, content: cevabiAyir(m.content).metin } : m)),
+        }),
         signal: iptal.signal,
       });
 
@@ -185,8 +243,9 @@ export default function Sohbet() {
               <div>
                 <h2 className="text-2xl font-semibold">Merhaba! 👋</h2>
                 <p className="mt-2 text-zinc-600 dark:text-zinc-400">
-                  İÜC ile ilgili sorularını sorabilirsin. Yönetmelik ve akademik takvim bilgileri yakında
-                  eklenecek.
+                  Sınavlar, notlar, devam, kayıt dondurma, mezuniyet gibi konularda İÜC Önlisans ve Lisans
+                  Eğitim ve Öğretim Yönetmeliği&apos;ne dayanarak, kaynak göstererek cevap veriyorum. Erasmus,
+                  akademik takvim gibi diğer konular yakında eklenecek.
                 </p>
               </div>
               <div className="flex w-full flex-col gap-2 sm:w-auto">
@@ -214,7 +273,7 @@ export default function Sohbet() {
                       : "max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-bl-md border border-zinc-200 bg-white px-4 py-2.5 dark:border-zinc-800 dark:bg-zinc-900"
                   }
                 >
-                  {m.content}
+                  {m.role === "assistant" ? <AsistanMesaji icerik={m.content} /> : m.content}
                 </div>
               </div>
             ),
